@@ -246,20 +246,20 @@ def get_podcast_highlights(podcast_transcript):
 
 @stub.function(image=corise_image, secret=modal.Secret.from_name("my-openai-secret"), timeout=1200)
 def process_podcast(url, episode_index=0, path="/content/podcast/"):
-    podcast_data = get_podcast_data.call(url, episode_index)
+    podcast_data = get_podcast_data.remote(url, episode_index)
 
     if not podcast_data.get('episode', False) or not podcast_data['episode'].get('url', False):
         print("No podcast data found")
         return
 
-    transcript = get_transcribe_podcast.call(
+    transcript = get_transcribe_podcast.remote(
         podcast_data['episode']['url'], path)
 
     output = {
         "podcast_details": podcast_data,
-        "summary": get_podcast_summary.call(transcript, podcast_data['episode']['description']),
-        "guests": get_podcast_guest.call(transcript, podcast_data['episode']['author']),
-        "highlights": get_podcast_highlights.call(transcript)
+        "summary": get_podcast_summary.remote(transcript, podcast_data['episode']['description']),
+        "guests": get_podcast_guest.remote(transcript, podcast_data['episode']['author']),
+        "highlights": get_podcast_highlights.remote(transcript)
     }
     podcast_data['episode']['transcript'] = transcript
 
@@ -269,6 +269,6 @@ def process_podcast(url, episode_index=0, path="/content/podcast/"):
 @stub.local_entrypoint()
 def test_method(url):
     print("Test method called")
-    result = process_podcast.call(url)
+    result = process_podcast.remote(url)
     print(result)
     return result
