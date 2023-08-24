@@ -22,25 +22,40 @@ corise_image = modal.Image.debian_slim().pip_install("feedparser",
                                                      "ffmpeg-python").apt_install("ffmpeg").run_function(download_whisper)
 
 
-@stub.function(image=corise_image, gpu="any", timeout=600)
-def get_transcribe_podcast(rss_url, local_path):
-    print("Starting Podcast Transcription Function")
-    print("Feed URL: ", rss_url)
-    print("Local Path:", local_path)
-
-    # Read from the RSS Feed URL
+@stub.function(image=corise_image, timeout=30)
+def get_podcast_data(rss_url, episode_index=0):
     import feedparser
-    intelligence_feed = feedparser.parse(rss_url)
-    podcast_title = intelligence_feed['feed']['title']
-    episode_title = intelligence_feed.entries[0]['title']
-    episode_image = intelligence_feed['feed']['image'].href
-    for item in intelligence_feed.entries[0].links:
-        if (item['type'] == 'audio/mpeg'):
-            episode_url = item.href
-    episode_name = "podcast_episode.mp3"
+
+    podcast_data = feedparser.parse(rss_url)
+    feed = podcast_data['feed']
+    episode = podcast_data.entries[episode_index]
+
+    output = {
+        "title": feed.get("title", ""),
+        "image": feed.get("image").href,
+        "episode": {
+            "title": episode.get("title", ""),
+            "description": episode.get("description", ""),
+            "published": episode.get("published", ""),
+            "author": episode.get("author", ""),
+        }
+    }
+
+    for link in episode.get("links", []):
+        if link['type'] == 'audio/mpeg':
+            output['episode']['url'] = link.href
+
+    return output
+
+
+@stub.function(image=corise_image, gpu="any", timeout=600)
+def get_transcribe_podcast(episode_url, local_path="/content/podcast/"):
+    print("Starting Podcast Transcription Function")
     print("RSS URL read and episode URL: ", episode_url)
 
     # Download the podcast episode by parsing the RSS feed
+    episode_name = "episode.mp3"
+
     from pathlib import Path
     p = Path(local_path)
     p.mkdir(exist_ok=True)
@@ -71,31 +86,33 @@ def get_transcribe_podcast(rss_url, local_path):
 
     # Return the transcribed text
     print("Podcast transcription completed, returning results...")
-    output = {}
-    output['podcast_title'] = podcast_title
-    output['episode_title'] = episode_title
-    output['episode_image'] = episode_image
-    output['episode_transcript'] = result['text']
-    return output
+
+    return result['text']
 
 
 @stub.function(image=corise_image, secret=modal.Secret.from_name("my-openai-secret"))
-def get_podcast_summary(podcast_transcript):
+def get_podcast_summary(transcript, description):
     import openai
-    summary_prompt = """
-    You are a copywriter working for a podcast company. Your job is to write a short description of a
-    podcast episode that will entice people to listen to it. You have been given a transcript of the
-    episode below. Keep the description to 280 characters or less.
+    summary_prompt = f"""
+    You are a personal assistant for a person who likes to listen to podcasts. Your job is to
+    summarize the podcast transcript below. You will be graded on the following criteria:
+    1. The summary you write is concise and captures the main points of the podcast
+    2. The summary you write is not too long (1-2 paragraphs)
+    3. The summary you write is grammatically correct
 
+    The podcast has its own description of the podcast episode, which you can use as a starting
+    point for your summary.
+
+    Episode Description: "{description}"
+
+    Episode Transcript: "{transcript}"
   """
-
-    request = summary_prompt + podcast_transcript
 
     chatOutput = openai.ChatCompletion.create(
         model="gpt-3.5-turbo-16k",
         messages=[
             {"role": "system", "content": "You are a helpful assistant."},
-            {"role": "user", "content": request}
+            {"role": "user", "content": summary_prompt}
         ]
     )
 
@@ -105,14 +122,26 @@ def get_podcast_summary(podcast_transcript):
 
 
 @stub.function(image=corise_image, secret=modal.Secret.from_name("my-openai-secret"))
-def get_podcast_guest(podcast_transcript):
+def get_podcast_guest(transcript, author_data):
     import openai
     import wikipedia
     import json
 
+    guests_prompt = f"""
+    You are a personal assistant for a person who likes to listen to podcasts. Your job is to
+    find interesting people who are speaking in the podcast transcript below. You will be graded
+    on the following criteria:
+
+    1. The people you find are speaking in the podcast
+    2. You correct for any spelling mistakes in the names of the people you find, using the authors
+    of the podcast as a reference: {author_data}
+
+    Episode Transcript: "{transcript}"
+    """
+
     completion = openai.ChatCompletion.create(
         model="gpt-3.5-turbo-16k",
-        messages=[{"role": "user", "content": podcast_transcript}],
+        messages=[{"role": "user", "content": guests_prompt}],
         functions=[
             {
                 "name": "get_interesting_people",
@@ -168,7 +197,7 @@ def get_podcast_guest(podcast_transcript):
         wiki = None
         try:
             wiki = wikipedia.page(
-                f"{guest.get('name')} {guest.get('title')} {guest.get('organization')}", auto_suggest=True)
+                f"{guest.get('name')} {guest.get('title')} {guest.get('organization')}", auto_suggest=False)
         except:
             None
 
@@ -194,9 +223,9 @@ def get_podcast_highlights(podcast_transcript):
         2. The highlights you pick are from different parts of the podcast
         3. The highlights you pick are not too long (1-2 sentences)
         The highlights you pick should be returned in Markdown format. For example:
-        - **Highlight 1:** This is the first highlight I picked
-        - **Highlight 2:** This is the second highlight I picked
-        - **Highlight 3:** This is the third highlight I picked
+        - **Title of first highlight:** This is the first highlight I picked
+        - **Title of second highlight:** This is the second highlight I picked
+        - **Title of third highlight:** This is the third highlight I picked
 
     """
 
@@ -216,31 +245,30 @@ def get_podcast_highlights(podcast_transcript):
 
 
 @stub.function(image=corise_image, secret=modal.Secret.from_name("my-openai-secret"), timeout=1200)
-def process_podcast(url, path):
-    output = {}
-    podcast_details = get_transcribe_podcast.call(url, path)
+def process_podcast(url, episode_index=0, path="/content/podcast/"):
+    podcast_data = get_podcast_data.call(url, episode_index)
 
-    podcast_summary = get_podcast_summary.call(
-        podcast_details['episode_transcript'])
-    podcast_guests = get_podcast_guest.call(
-        podcast_details['episode_transcript'])
-    podcast_highlights = get_podcast_highlights.call(
-        podcast_details['episode_transcript'])
+    if not podcast_data.get('episode', False) or not podcast_data['episode'].get('url', False):
+        print("No podcast data found")
+        return
 
-    output['podcast_details'] = podcast_details
-    output['podcast_summary'] = podcast_summary
-    output['podcast_guests'] = podcast_guests
-    output['podcast_highlights'] = podcast_highlights
+    transcript = get_transcribe_podcast.call(
+        podcast_data['episode']['url'], path)
+
+    output = {
+        "podcast_details": podcast_data,
+        "summary": get_podcast_summary.call(transcript, podcast_data['episode']['description']),
+        "guests": get_podcast_guest.call(transcript, podcast_data['episode']['author']),
+        "highlights": get_podcast_highlights.call(transcript)
+    }
+    podcast_data['episode']['transcript'] = transcript
+
     return output
 
 
 @stub.local_entrypoint()
-def test_method(url, path):
-    output = {}
-    podcast_details = get_transcribe_podcast.call(url, path)
-    print("Podcast Summary: ", get_podcast_summary.call(
-        podcast_details['episode_transcript']))
-    print("Podcast Guest Information: ", get_podcast_guest.call(
-        podcast_details['episode_transcript']))
-    print("Podcast Highlights: ", get_podcast_highlights.call(
-        podcast_details['episode_transcript']))
+def test_method(url):
+    print("Test method called")
+    result = process_podcast.call(url)
+    print(result)
+    return result
